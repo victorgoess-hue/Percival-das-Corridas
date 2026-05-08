@@ -8,7 +8,6 @@ const Groq = require('groq-sdk');
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-// Estado de cada usuário
 const usuarios = {};
 
 const PERGUNTAS = [
@@ -28,7 +27,7 @@ const PERGUNTAS = [
 const SYSTEM_PROMPT_BASE = `Você é o Professor Pace, um treinador de corrida experiente, didático e motivador.
 Você atende alunos de todos os níveis, desde iniciantes até corredores avançados.
 Use tom professoral, empático e encorajador.
-Use emojis relevantes e deixe pontos importantes em *negrito* com asteriscos simples.
+Use emojis relevantes e deixe pontos importantes em negrito.
 Ao montar planos, considere sempre:
 - Progressão gradual e segura
 - Prevenção de lesões
@@ -61,6 +60,23 @@ const CAMPOS_PERFIL = [
   'pace', 'objetivo', 'dias', 'atividades', 'lesoes', 'prova'
 ];
 
+async function enviarMensagemLonga(chatId, texto) {
+  const LIMITE = 4000;
+  if (texto.length <= LIMITE) {
+    await bot.sendMessage(chatId, texto);
+  } else {
+    const partes = [];
+    let t = texto;
+    while (t.length > 0) {
+      partes.push(t.substring(0, LIMITE));
+      t = t.substring(LIMITE);
+    }
+    for (const parte of partes) {
+      await bot.sendMessage(chatId, parte);
+    }
+  }
+}
+
 async function gerarPlanoInicial(chatId) {
   const usuario = usuarios[chatId];
   const systemPrompt = buildSystemPrompt(usuario.perfil);
@@ -86,28 +102,11 @@ async function gerarPlanoInicial(chatId) {
     usuario.onboarding = false;
 
     await enviarMensagemLonga(chatId, resposta);
-    await bot.sendMessage(chatId, '✅ Plano criado! Agora é só me contar como foram seus treinos e terei todo o prazer em acompanhar sua evolução, *' + usuario.perfil.nome + '*! 💪', { parse_mode: 'Markdown' });
+    await bot.sendMessage(chatId, '✅ Plano criado! Agora é só me contar como foram seus treinos, ' + usuario.perfil.nome + '! 💪');
 
   } catch (err) {
     console.error('Erro ao gerar plano:', err.message);
     bot.sendMessage(chatId, 'Ocorreu um erro ao gerar seu plano. Tente novamente com /start');
-  }
-}
-
-async function enviarMensagemLonga(chatId, texto) {
-  const LIMITE = 4000;
-  if (texto.length <= LIMITE) {
-    await bot.sendMessage(chatId, texto, { parse_mode: 'Markdown' });
-  } else {
-    const partes = [];
-    let t = texto;
-    while (t.length > 0) {
-      partes.push(t.substring(0, LIMITE));
-      t = t.substring(LIMITE);
-    }
-    for (const parte of partes) {
-      await bot.sendMessage(chatId, parte, { parse_mode: 'Markdown' });
-    }
   }
 }
 
@@ -134,7 +133,6 @@ bot.on('message', async (msg) => {
 
   if (texto === '/start') return;
 
-  // Usuário novo sem /start
   if (!usuarios[chatId]) {
     bot.sendMessage(chatId, 'Olá! Digite /start para começar. 🏃‍♂️');
     return;
@@ -142,7 +140,6 @@ bot.on('message', async (msg) => {
 
   const usuario = usuarios[chatId];
 
-  // Onboarding
   if (usuario.onboarding) {
     const campo = CAMPOS_PERFIL[usuario.etapa];
     usuario.perfil[campo] = texto;
@@ -151,13 +148,12 @@ bot.on('message', async (msg) => {
     if (usuario.etapa < PERGUNTAS.length) {
       bot.sendMessage(chatId, PERGUNTAS[usuario.etapa], { parse_mode: 'Markdown' });
     } else {
-      await bot.sendMessage(chatId, '⏳ Perfeito! Estou montando seu plano personalizado, aguarde um momento...', { parse_mode: 'Markdown' });
+      await bot.sendMessage(chatId, '⏳ Perfeito! Estou montando seu plano personalizado, aguarde um momento...');
       await gerarPlanoInicial(chatId);
     }
     return;
   }
 
-  // Chat normal após onboarding
   usuario.historico.push({ role: 'user', content: texto });
 
   try {
