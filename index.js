@@ -1,21 +1,20 @@
 console.log('=== BOT INICIANDO ===');
 console.log('TELEGRAM_TOKEN:', process.env.TELEGRAM_TOKEN ? 'OK' : 'NÃO ENCONTRADO');
-console.log('GROQ_API_KEY:', process.env.GROQ_API_KEY ? 'OK' : 'NÃO ENCONTRADO');
+console.log('CEREBRAS_API_KEY:', process.env.CEREBRAS_API_KEY ? 'OK' : 'NÃO ENCONTRADO');
 
 const TelegramBot = require('node-telegram-bot-api');
-const Groq = require('groq-sdk');
+const Cerebras = require('@cerebras/cerebras_cloud_sdk');
 
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const cerebras = new Cerebras({ apiKey: process.env.CEREBRAS_API_KEY });
 
 const usuarios = {};
 
-// Máximo de mensagens no histórico enviado ao Groq (para não estourar tokens)
-const MAX_HISTORICO = 10;
-
-// Máximo de tokens de resposta — reduzido para evitar estouro no plano inicial
-const MAX_TOKENS_PLANO = 4096;
+// Cerebras free tier: 8.192 tokens de contexto — manter histórico curto
+const MAX_HISTORICO = 8;
+const MAX_TOKENS_PLANO = 2048;
 const MAX_TOKENS_CHAT  = 1024;
+const MODELO = 'gpt-oss-120b'; // modelo mais capaz do Cerebras
 
 const PERGUNTAS = [
   '👋 Olá! Sou o <b>Professor Pace</b>, seu treinador pessoal de corrida!\n\nVamos montar seu plano personalizado. Primeira pergunta:\n\n<b>Qual é o seu nome?</b>',
@@ -34,14 +33,15 @@ const PERGUNTAS = [
 const SYSTEM_PROMPT_BASE = `Você é o Professor Pace, um treinador de corrida experiente, didático e motivador.
 Você atende alunos de todos os níveis, desde iniciantes até corredores avançados.
 Use tom professoral, empático e encorajador.
-Use emojis relevantes e deixe pontos importantes em negrito usando tags HTML (<b>texto</b>).
+Use emojis relevantes e deixe pontos importantes em negrito com tags HTML (<b>texto</b>).
 NÃO use Markdown (como *texto* ou _texto_). Use apenas HTML simples: <b> para negrito, <i> para itálico.
 Ao montar planos, considere sempre:
 - Progressão gradual e segura
 - Prevenção de lesões
 - Equilíbrio entre treino e descanso
 - Motivação e adesão ao plano
-Quando o aluno reportar treinos, analise pace, distância e sensação para dar feedback preciso.`;
+Quando o aluno reportar treinos, analise pace, distância e sensação para dar feedback preciso.
+Seja objetivo e direto nas respostas para não ultrapassar o limite de tokens.`;
 
 function buildSystemPrompt(perfil) {
   return `${SYSTEM_PROMPT_BASE}
@@ -68,13 +68,13 @@ const CAMPOS_PERFIL = [
   'pace', 'objetivo', 'dias', 'atividades', 'lesoes', 'prova'
 ];
 
-// Trunca o histórico para não estourar o limite de tokens do Groq
+// Trunca o histórico para não estourar o limite de contexto (8.192 tokens no free tier)
 function truncarHistorico(historico) {
   if (historico.length <= MAX_HISTORICO) return historico;
   return historico.slice(historico.length - MAX_HISTORICO);
 }
 
-// Envia mensagem longa em partes, usando parse_mode HTML
+// Envia mensagem longa em partes com parse_mode HTML
 async function enviarMensagemLonga(chatId, texto) {
   const LIMITE = 4000;
   const partes = [];
@@ -87,7 +87,6 @@ async function enviarMensagemLonga(chatId, texto) {
     try {
       await bot.sendMessage(chatId, parte, { parse_mode: 'HTML' });
     } catch (err) {
-      // Se ainda falhar por entidade HTML inválida, envia sem formatação
       console.warn('Falha ao enviar com HTML, enviando sem formatação:', err.message);
       await bot.sendMessage(chatId, parte);
     }
@@ -101,8 +100,8 @@ async function gerarPlanoInicial(chatId) {
   const mensagemGerarPlano = `Apresente-se brevemente e monte um plano de treino personalizado completo para ${usuario.perfil.nome} com base no perfil dele. Inclua semanas, treinos por dia, paces recomendados e dicas importantes. Seja detalhado e motivador. Use tags HTML para formatação (<b> para negrito).`;
 
   try {
-    const resultado = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const resultado = await cerebras.chat.completions.create({
+      model: MODELO,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: mensagemGerarPlano },
@@ -179,8 +178,8 @@ bot.on('message', async (msg) => {
   try {
     const historicoTruncado = truncarHistorico(usuario.historico);
 
-    const resultado = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
+    const resultado = await cerebras.chat.completions.create({
+      model: MODELO,
       messages: [
         { role: 'system', content: usuario.systemPrompt },
         ...historicoTruncado,
@@ -193,14 +192,14 @@ bot.on('message', async (msg) => {
     await enviarMensagemLonga(chatId, resposta);
 
   } catch (err) {
-    console.error('Erro ao chamar Groq:', err.message);
+    console.error('Erro ao chamar Cerebras:', err.message);
 
-    // Se ainda estourar tokens mesmo com truncamento, limpa o histórico e avisa
-    if (err.message && err.message.includes('413')) {
+    // Rate limit ou contexto estourado: limpa histórico e avisa
+    if (err.status === 429 || err.status === 413) {
       usuario.historico = [];
       bot.sendMessage(
         chatId,
-        '⚠️ Nossa conversa ficou muito longa e precisei reiniciar o histórico para continuar. Pode repetir sua última mensagem?'
+        '⚠️ Limite temporário atingido, precisei reiniciar o histórico. Pode repetir sua última mensagem?'
       );
     } else {
       bot.sendMessage(chatId, 'Ocorreu um erro, tente novamente.');
