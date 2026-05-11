@@ -10,24 +10,32 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const usuarios = {};
 
+// Máximo de mensagens no histórico enviado ao Groq (para não estourar tokens)
+const MAX_HISTORICO = 10;
+
+// Máximo de tokens de resposta — reduzido para evitar estouro no plano inicial
+const MAX_TOKENS_PLANO = 4096;
+const MAX_TOKENS_CHAT  = 1024;
+
 const PERGUNTAS = [
-  '👋 Olá! Sou o *Professor Pace*, seu treinador pessoal de corrida!\n\nVamos montar seu plano personalizado. Primeira pergunta:\n\n*Qual é o seu nome?*',
-  '📅 Quantos *anos* você tem?',
-  '⚖️ Qual é o seu *peso aproximado* (em kg)?',
-  '🏃 Como você descreveria seu *nível atual de corrida?*\n\n1 - Nunca corri\n2 - Corro ocasionalmente\n3 - Corro regularmente (1-2x semana)\n4 - Corro 3-4x semana\n5 - Corredor experiente',
-  '📏 Qual a *maior distância* que você já correu de uma vez? (ex: 5km, 10km, nunca corri)',
-  '⏱️ Se você corre, qual é seu *pace médio* aproximado? (ex: 6:30/km)\nSe nunca correu, escreva: *não sei*',
-  '🎯 Qual é o seu *objetivo principal?*\n\n1 - Começar a correr do zero\n2 - Melhorar meu condicionamento\n3 - Correr 5km\n4 - Correr 10km\n5 - Correr meia maratona ou mais\n6 - Emagrecer correndo',
-  '📆 Quantos *dias por semana* você pode treinar?',
-  '🏋️ Você faz alguma outra *atividade física* além de correr? (musculação, natação, ciclismo, etc)\nSe não, escreva: *não*',
-  '⚠️ Você tem alguma *lesão ou limitação física* que devo considerar?\nSe não, escreva: *não*',
-  '🏁 Tem alguma *prova ou data* que quer se preparar?\n(ex: 10km em setembro, maratona em dezembro)\nSe não, escreva: *não*',
+  '👋 Olá! Sou o <b>Professor Pace</b>, seu treinador pessoal de corrida!\n\nVamos montar seu plano personalizado. Primeira pergunta:\n\n<b>Qual é o seu nome?</b>',
+  '📅 Quantos <b>anos</b> você tem?',
+  '⚖️ Qual é o seu <b>peso aproximado</b> (em kg)?',
+  '🏃 Como você descreveria seu <b>nível atual de corrida?</b>\n\n1 - Nunca corri\n2 - Corro ocasionalmente\n3 - Corro regularmente (1-2x semana)\n4 - Corro 3-4x semana\n5 - Corredor experiente',
+  '📏 Qual a <b>maior distância</b> que você já correu de uma vez? (ex: 5km, 10km, nunca corri)',
+  '⏱️ Se você corre, qual é seu <b>pace médio</b> aproximado? (ex: 6:30/km)\nSe nunca correu, escreva: <b>não sei</b>',
+  '🎯 Qual é o seu <b>objetivo principal?</b>\n\n1 - Começar a correr do zero\n2 - Melhorar meu condicionamento\n3 - Correr 5km\n4 - Correr 10km\n5 - Correr meia maratona ou mais\n6 - Emagrecer correndo',
+  '📆 Quantos <b>dias por semana</b> você pode treinar?',
+  '🏋️ Você faz alguma outra <b>atividade física</b> além de correr? (musculação, natação, ciclismo, etc)\nSe não, escreva: <b>não</b>',
+  '⚠️ Você tem alguma <b>lesão ou limitação física</b> que devo considerar?\nSe não, escreva: <b>não</b>',
+  '🏁 Tem alguma <b>prova ou data</b> que quer se preparar?\n(ex: 10km em setembro, maratona em dezembro)\nSe não, escreva: <b>não</b>',
 ];
 
 const SYSTEM_PROMPT_BASE = `Você é o Professor Pace, um treinador de corrida experiente, didático e motivador.
 Você atende alunos de todos os níveis, desde iniciantes até corredores avançados.
 Use tom professoral, empático e encorajador.
-Use emojis relevantes e deixe pontos importantes em negrito.
+Use emojis relevantes e deixe pontos importantes em negrito usando tags HTML (<b>texto</b>).
+NÃO use Markdown (como *texto* ou _texto_). Use apenas HTML simples: <b> para negrito, <i> para itálico.
 Ao montar planos, considere sempre:
 - Progressão gradual e segura
 - Prevenção de lesões
@@ -60,18 +68,27 @@ const CAMPOS_PERFIL = [
   'pace', 'objetivo', 'dias', 'atividades', 'lesoes', 'prova'
 ];
 
+// Trunca o histórico para não estourar o limite de tokens do Groq
+function truncarHistorico(historico) {
+  if (historico.length <= MAX_HISTORICO) return historico;
+  return historico.slice(historico.length - MAX_HISTORICO);
+}
+
+// Envia mensagem longa em partes, usando parse_mode HTML
 async function enviarMensagemLonga(chatId, texto) {
   const LIMITE = 4000;
-  if (texto.length <= LIMITE) {
-    await bot.sendMessage(chatId, texto);
-  } else {
-    const partes = [];
-    let t = texto;
-    while (t.length > 0) {
-      partes.push(t.substring(0, LIMITE));
-      t = t.substring(LIMITE);
-    }
-    for (const parte of partes) {
+  const partes = [];
+  let t = texto;
+  while (t.length > 0) {
+    partes.push(t.substring(0, LIMITE));
+    t = t.substring(LIMITE);
+  }
+  for (const parte of partes) {
+    try {
+      await bot.sendMessage(chatId, parte, { parse_mode: 'HTML' });
+    } catch (err) {
+      // Se ainda falhar por entidade HTML inválida, envia sem formatação
+      console.warn('Falha ao enviar com HTML, enviando sem formatação:', err.message);
       await bot.sendMessage(chatId, parte);
     }
   }
@@ -81,7 +98,7 @@ async function gerarPlanoInicial(chatId) {
   const usuario = usuarios[chatId];
   const systemPrompt = buildSystemPrompt(usuario.perfil);
 
-  const mensagemGerarPlano = `Apresente-se brevemente e monte um plano de treino personalizado completo para ${usuario.perfil.nome} com base no perfil dele. Inclua semanas, treinos por dia, paces recomendados e dicas importantes. Seja detalhado e motivador.`;
+  const mensagemGerarPlano = `Apresente-se brevemente e monte um plano de treino personalizado completo para ${usuario.perfil.nome} com base no perfil dele. Inclua semanas, treinos por dia, paces recomendados e dicas importantes. Seja detalhado e motivador. Use tags HTML para formatação (<b> para negrito).`;
 
   try {
     const resultado = await groq.chat.completions.create({
@@ -90,7 +107,7 @@ async function gerarPlanoInicial(chatId) {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: mensagemGerarPlano },
       ],
-      max_tokens: 8192,
+      max_tokens: MAX_TOKENS_PLANO,
     });
 
     const resposta = resultado.choices[0].message.content;
@@ -102,7 +119,10 @@ async function gerarPlanoInicial(chatId) {
     usuario.onboarding = false;
 
     await enviarMensagemLonga(chatId, resposta);
-    await bot.sendMessage(chatId, '✅ Plano criado! Agora é só me contar como foram seus treinos, ' + usuario.perfil.nome + '! 💪');
+    await bot.sendMessage(
+      chatId,
+      `✅ Plano criado! Agora é só me contar como foram seus treinos, ${usuario.perfil.nome}! 💪`
+    );
 
   } catch (err) {
     console.error('Erro ao gerar plano:', err.message);
@@ -119,7 +139,7 @@ bot.onText(/\/start/, (msg) => {
     historico: [],
     systemPrompt: '',
   };
-  bot.sendMessage(chatId, PERGUNTAS[0], { parse_mode: 'Markdown' });
+  bot.sendMessage(chatId, PERGUNTAS[0], { parse_mode: 'HTML' });
 });
 
 bot.on('message', async (msg) => {
@@ -146,7 +166,7 @@ bot.on('message', async (msg) => {
     usuario.etapa++;
 
     if (usuario.etapa < PERGUNTAS.length) {
-      bot.sendMessage(chatId, PERGUNTAS[usuario.etapa], { parse_mode: 'Markdown' });
+      bot.sendMessage(chatId, PERGUNTAS[usuario.etapa], { parse_mode: 'HTML' });
     } else {
       await bot.sendMessage(chatId, '⏳ Perfeito! Estou montando seu plano personalizado, aguarde um momento...');
       await gerarPlanoInicial(chatId);
@@ -157,13 +177,15 @@ bot.on('message', async (msg) => {
   usuario.historico.push({ role: 'user', content: texto });
 
   try {
+    const historicoTruncado = truncarHistorico(usuario.historico);
+
     const resultado = await groq.chat.completions.create({
       model: 'llama-3.3-70b-versatile',
       messages: [
         { role: 'system', content: usuario.systemPrompt },
-        ...usuario.historico,
+        ...historicoTruncado,
       ],
-      max_tokens: 8192,
+      max_tokens: MAX_TOKENS_CHAT,
     });
 
     const resposta = resultado.choices[0].message.content;
@@ -172,7 +194,17 @@ bot.on('message', async (msg) => {
 
   } catch (err) {
     console.error('Erro ao chamar Groq:', err.message);
-    bot.sendMessage(chatId, 'Ocorreu um erro, tente novamente.');
+
+    // Se ainda estourar tokens mesmo com truncamento, limpa o histórico e avisa
+    if (err.message && err.message.includes('413')) {
+      usuario.historico = [];
+      bot.sendMessage(
+        chatId,
+        '⚠️ Nossa conversa ficou muito longa e precisei reiniciar o histórico para continuar. Pode repetir sua última mensagem?'
+      );
+    } else {
+      bot.sendMessage(chatId, 'Ocorreu um erro, tente novamente.');
+    }
   }
 });
 
